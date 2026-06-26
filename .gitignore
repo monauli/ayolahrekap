@@ -1,0 +1,31 @@
+# Build artifacts
+.build-tools/
+.build-venv/
+build/
+dist/
+*.spec~
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Business data (jangan di-upload)
+data/
+outputs/
+DOKUMEN/
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+*.xls
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
+*.log
