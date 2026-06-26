@@ -1844,6 +1844,29 @@ def _rincian_row_height(kind: str) -> float:
     return {"title": 37.5, "summaryA": 28.5, "summaryB": 31.5, "header": 25.5}.get(kind, 15.75)
 
 
+def _write_rincian_title(ws, r: int, title_text: str, band_fill, border) -> None:
+    """Baris judul: kiri = 'Rincian Penjualan' + periode, kanan = nama club besar."""
+    lines = [ln.strip() for ln in (title_text or "").split("\n") if ln.strip()]
+    first = lines[0] if lines else "Rincian Penjualan"
+    periode = next((ln for ln in lines if ln.lower().startswith("periode")), "")
+    club = first.replace("Rincian Penjualan", "").strip() or "BC PADEL CLUB"
+    left = "Rincian Penjualan" + (("\n" + periode) if periode else "")
+
+    for c in range(1, _RINCIAN_NCOLS + 1):
+        cell = ws.cell(row=r, column=c)
+        cell.fill = band_fill
+        cell.border = border
+
+    left_cell = ws.cell(row=r, column=1, value=left)
+    left_cell.font = Font(size=10)
+    left_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    club_cell = ws.cell(row=r, column=6, value=club)
+    club_cell.font = Font(size=16, bold=True)
+    club_cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    ws.merge_cells(start_row=r, start_column=6, end_row=r, end_column=_RINCIAN_NCOLS)
+
+
 def _write_rincian_penjualan_sheet(workbook, pdf, path, used_titles, should_cancel=None):
     """Tulis 1 sheet bergaya laporan 'Rincian Penjualan' harian dari sebuah PDF."""
     title_text = ""
@@ -1884,19 +1907,26 @@ def _write_rincian_penjualan_sheet(workbook, pdf, path, used_titles, should_canc
 
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    fill = PatternFill("solid", fgColor="D9E1E5")
+    band_fill = PatternFill("solid", fgColor="9DC3E6")    # band biru: judul & total
+    header_fill = PatternFill("solid", fgColor="BFBFBF")  # header abu-abu
 
     for r, (kind, cells) in enumerate(layout, start=1):
+        if kind == "title":
+            _write_rincian_title(ws, r, title_text, band_fill, border)
+            ws.row_dimensions[r].height = _rincian_row_height(kind)
+            continue
         for c in range(1, _RINCIAN_NCOLS + 1):
-            keep_nl = kind in ("title", "summaryA", "summaryB") or (kind == "data" and c == 2)
+            keep_nl = kind in ("summaryA", "summaryB") or (kind == "data" and c == 2)
             cell = ws.cell(row=r, column=c, value=_rincian_cell(cells[c - 1], keep_newlines=keep_nl) or None)
             cell.border = border
-            cell.font = Font(size=10, bold=(kind == "total"))
-            if kind in ("header", "total"):
-                cell.fill = fill
+            cell.font = Font(size=10, bold=(kind in ("header", "total")))
+            if kind == "header":
+                cell.fill = header_fill
+            elif kind == "total":
+                cell.fill = band_fill
             if kind == "total" and c == 1:
-                cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
-            elif kind in ("header",) or (kind not in ("title", "summaryA", "summaryB") and c not in _RINCIAN_TEXT_COLS):
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            elif kind == "header" or (kind not in ("summaryA", "summaryB") and c not in _RINCIAN_TEXT_COLS):
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             else:
                 cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
@@ -1943,6 +1973,7 @@ def convert_pdfs_to_excel(
     table_count = 0
     data_row_count = 0
     empty_pages = 0
+    used_generic = False  # True jika ada PDF non-Rincian (butuh sheet Ringkasan)
 
     for file_index, path in enumerate(paths, 1):
         ensure_not_cancelled(should_cancel)
@@ -1965,6 +1996,7 @@ def convert_pdfs_to_excel(
                     )
                     continue
 
+                used_generic = True
                 for page_number, page in enumerate(pdf.pages, 1):
                     ensure_not_cancelled(should_cancel)
                     if progress:
@@ -2023,22 +2055,26 @@ def convert_pdfs_to_excel(
             "Tidak ada teks atau tabel yang terbaca. PDF kemungkinan berupa hasil scan; gunakan PDF dengan teks digital atau lakukan OCR terlebih dahulu."
         )
 
-    summary_headers = ["File PDF", "Halaman", "Isi Terdeteksi", "Jumlah Baris", "Sheet Excel"]
-    summary.append(summary_headers)
-    for row in summary_rows:
-        summary.append(row)
-    summary.sheet_view.showGridLines = False
-    summary.freeze_panes = "A2"
-    summary.auto_filter.ref = f"A1:E{summary.max_row}"
-    for cell in summary[1]:
-        cell.fill = PatternFill("solid", fgColor="117F74")
-        cell.font = Font(color="FFFFFF", bold=True)
-        cell.alignment = Alignment(vertical="center")
-    for row in summary.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-    for column, width in {"A": 38, "B": 12, "C": 18, "D": 15, "E": 31}.items():
-        summary.column_dimensions[column].width = width
+    if used_generic:
+        summary_headers = ["File PDF", "Halaman", "Isi Terdeteksi", "Jumlah Baris", "Sheet Excel"]
+        summary.append(summary_headers)
+        for row in summary_rows:
+            summary.append(row)
+        summary.sheet_view.showGridLines = False
+        summary.freeze_panes = "A2"
+        summary.auto_filter.ref = f"A1:E{summary.max_row}"
+        for cell in summary[1]:
+            cell.fill = PatternFill("solid", fgColor="117F74")
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(vertical="center")
+        for row in summary.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+        for column, width in {"A": 38, "B": 12, "C": 18, "D": 15, "E": 31}.items():
+            summary.column_dimensions[column].width = width
+    elif len(workbook.sheetnames) > 1:
+        # Semua PDF berupa Rincian Penjualan: buang sheet "Ringkasan" agar 1 sheet saja.
+        workbook.remove(summary)
 
     output_path = output_path or unique_output_path(f"PDF to Excel {datetime.now():%Y-%m-%d %H%M}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
