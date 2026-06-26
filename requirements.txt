@@ -1,3 +1,4 @@
 openpyxl>=3.1
 pdfplumber>=0.11,<1
 cryptography>=36,<49
+streamlit>=1.36

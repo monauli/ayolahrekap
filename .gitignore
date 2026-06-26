@@ -23,6 +23,9 @@ DOKUMEN/
 *.xlsx
 *.xls
 
+# Streamlit secrets (password jangan masuk repo)
+.streamlit/secrets.toml
+
 # OS / editor
 Thumbs.db
 .DS_Store
