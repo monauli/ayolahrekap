@@ -1768,6 +1768,150 @@ def _style_pdf_sheet(ws, header_rows: set[int]) -> None:
         ws.column_dimensions[get_column_letter(column)].width = min(45, max(12, width + 2))
 
 
+# ── Rincian Penjualan harian (Olsera) ───────────────────────────────────────
+# Layout 19 kolom (A-S) mengikuti contoh "Rincian penjualana Pelanggan.xlsx".
+_RINCIAN_NCOLS = 19
+_RINCIAN_MERGES_SUMMARY_A = [(1, 2), (3, 5), (6, 9), (10, 12), (13, 16), (17, 19)]
+_RINCIAN_MERGES_SUMMARY_B = [(1, 2), (3, 5), (6, 9), (10, 12), (13, 19)]
+_RINCIAN_MERGES_ROW = [(2, 3), (9, 10), (12, 13), (16, 17)]
+_RINCIAN_MERGES_TOTAL = [(1, 7), (9, 10), (12, 13), (16, 17)]
+_RINCIAN_COL_WIDTHS = {1: 16.8, 2: 12.1, 3: 15.8, 4: 17.4, 5: 0.1, 9: 9.0, 10: 9.8,
+                       11: 9.0, 12: 9.0, 14: 11.2, 15: 9.0, 16: 0.1, 19: 11.0}
+_RINCIAN_TEXT_COLS = {1, 2, 4, 5, 6, 7}  # rata kiri (No. Pesanan, Tanggal, Penjual, dst.)
+_EN_TO_ID_MONTH = {
+    "January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
+    "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
+    "September": "September", "October": "Oktober", "November": "November", "December": "Desember",
+}
+
+
+def _rincian_cell(value: Any, keep_newlines: bool = False) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    if not keep_newlines:
+        text = re.sub(r"\s*\n\s*", " ", text)
+    text = text.strip()[:32767]
+    if text.startswith(("=", "+", "@")):
+        text = "'" + text
+    return text
+
+
+def _rincian_pad(row) -> list[Any]:
+    cells = list(row or [])[:_RINCIAN_NCOLS]
+    return cells + [None] * (_RINCIAN_NCOLS - len(cells))
+
+
+# Posisi kolom (0-based) untuk 8 nilai uang di baris data/total:
+# Total Penjualan, Pengiriman+Pajak, Modal, Laba, Biaya Layanan, Tambahan, Diskon, Jumlah Ditebus.
+_RINCIAN_MONEY_COLS = [8, 10, 11, 13, 14, 15, 17, 18]
+
+
+def _rincian_total_cells(cells: list[Any]) -> list[Any]:
+    """Baris 'Total' di PDF sering punya jumlah kolom berbeda; tata ulang ke 19 kolom.
+
+    Strukturnya: label + Qty + 8 nilai uang. Diambil berurutan dari sel non-kosong
+    lalu ditempatkan ke posisi kolom yang sesuai layout (Qty di kolom H).
+    """
+    values = [c for c in cells[1:] if _rincian_cell(c)]
+    out: list[Any] = [None] * _RINCIAN_NCOLS
+    out[0] = cells[0]
+    if values:
+        out[7] = values[0]  # Qty
+        for idx, value in enumerate(values[1:]):
+            if idx < len(_RINCIAN_MONEY_COLS):
+                out[_RINCIAN_MONEY_COLS[idx]] = value
+    return out
+
+
+def _is_rincian_penjualan(pdf) -> bool:
+    try:
+        text = (pdf.pages[0].extract_text() or "")[:300]
+    except Exception:
+        return False
+    return "Rincian Penjualan" in text
+
+
+def _rincian_merges(kind: str) -> list[tuple[int, int]]:
+    return {
+        "title": [(1, _RINCIAN_NCOLS)],
+        "summaryA": _RINCIAN_MERGES_SUMMARY_A,
+        "summaryB": _RINCIAN_MERGES_SUMMARY_B,
+        "total": _RINCIAN_MERGES_TOTAL,
+    }.get(kind, _RINCIAN_MERGES_ROW)
+
+
+def _rincian_row_height(kind: str) -> float:
+    return {"title": 37.5, "summaryA": 28.5, "summaryB": 31.5, "header": 25.5}.get(kind, 15.75)
+
+
+def _write_rincian_penjualan_sheet(workbook, pdf, path, used_titles, should_cancel=None):
+    """Tulis 1 sheet bergaya laporan 'Rincian Penjualan' harian dari sebuah PDF."""
+    title_text = ""
+    layout: list[tuple[str, list[Any]]] = []  # (kind, 19 sel)
+    data_count = 0
+
+    for page in pdf.pages:
+        ensure_not_cancelled(should_cancel)
+        tables = page.extract_tables() or []
+        if not tables:
+            continue
+        for raw in tables[0]:
+            cells = _rincian_pad(raw)
+            head = _rincian_cell(cells[0])
+            if head.startswith("Rincian Penjualan"):
+                title_text = _rincian_cell(cells[0], keep_newlines=True)
+                layout.append(("title", cells))
+            elif head.startswith("Total Penjualan"):
+                layout.append(("summaryA", cells))
+            elif head.startswith("Diskon") and not any(k == "summaryB" for k, _ in layout):
+                layout.append(("summaryB", cells))
+            elif head == "No. Pesanan":
+                if not any(k == "header" for k, _ in layout):
+                    layout.append(("header", cells))
+            elif head.startswith("Total -"):
+                layout.append(("total", _rincian_total_cells(cells)))
+            elif re.match(r"^[A-Z0-9]{8,}$", head):
+                layout.append(("data", cells))
+                data_count += 1
+
+    # Nama sheet = tanggal periode (mis. "01 Juni"), fallback ke nama file.
+    sheet_name = path.stem
+    match = re.search(r"Periode\s+(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})", title_text)
+    if match:
+        sheet_name = f"{int(match.group(1)):02d} {_EN_TO_ID_MONTH.get(match.group(2), match.group(2))}"
+    title = _unique_sheet_title(sheet_name, used_titles)
+    ws = workbook.create_sheet(title)
+
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fill = PatternFill("solid", fgColor="D9E1E5")
+
+    for r, (kind, cells) in enumerate(layout, start=1):
+        for c in range(1, _RINCIAN_NCOLS + 1):
+            keep_nl = kind in ("title", "summaryA", "summaryB") or (kind == "data" and c == 2)
+            cell = ws.cell(row=r, column=c, value=_rincian_cell(cells[c - 1], keep_newlines=keep_nl) or None)
+            cell.border = border
+            cell.font = Font(size=10, bold=(kind == "total"))
+            if kind in ("header", "total"):
+                cell.fill = fill
+            if kind == "total" and c == 1:
+                cell.alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+            elif kind in ("header",) or (kind not in ("title", "summaryA", "summaryB") and c not in _RINCIAN_TEXT_COLS):
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            else:
+                cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True)
+        for c1, c2 in _rincian_merges(kind):
+            if c2 > c1:
+                ws.merge_cells(start_row=r, start_column=c1, end_row=r, end_column=c2)
+        ws.row_dimensions[r].height = _rincian_row_height(kind)
+
+    for col, width in _RINCIAN_COL_WIDTHS.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.sheet_view.showGridLines = False
+
+    return title, len(pdf.pages), data_count
+
+
 def convert_pdfs_to_excel(
     pdf_paths: list[Path | str],
     output_path: Path | None = None,
@@ -1807,6 +1951,18 @@ def convert_pdfs_to_excel(
                 total_pages = len(pdf.pages)
                 if total_pages == 0:
                     summary_rows.append([path.name, "-", "Kosong", 0, "-"])
+                    continue
+
+                if _is_rincian_penjualan(pdf):
+                    sheet_title, pages_written, rows_written = _write_rincian_penjualan_sheet(
+                        workbook, pdf, path, used_titles, should_cancel
+                    )
+                    page_count += pages_written
+                    table_count += 1
+                    data_row_count += rows_written
+                    summary_rows.append(
+                        [path.name, pages_written, "Rincian Penjualan", rows_written, sheet_title]
+                    )
                     continue
 
                 for page_number, page in enumerate(pdf.pages, 1):
